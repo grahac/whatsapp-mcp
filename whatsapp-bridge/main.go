@@ -641,7 +641,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -800,14 +800,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -834,7 +834,10 @@ func main() {
 	}
 	defer messageStore.Close()
 
-	// Setup event handling for messages and history sync
+	// Setup event handling for messages and history sync. Messages missed while
+	// disconnected are delivered automatically on reconnect via WhatsApp's
+	// offline queue replay and the resulting HistorySync push, so no explicit
+	// on-demand backfill request is needed.
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
@@ -973,7 +976,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -988,7 +991,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
@@ -1145,42 +1148,6 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
-}
-
-// Request history sync from the server
-func requestHistorySync(client *whatsmeow.Client) {
-	if client == nil {
-		fmt.Println("Client is not initialized. Cannot request history sync.")
-		return
-	}
-
-	if !client.IsConnected() {
-		fmt.Println("Client is not connected. Please ensure you are connected to WhatsApp first.")
-		return
-	}
-
-	if client.Store.ID == nil {
-		fmt.Println("Client is not logged in. Please scan the QR code first.")
-		return
-	}
-
-	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
-	if historyMsg == nil {
-		fmt.Println("Failed to build history sync request.")
-		return
-	}
-
-	_, err := client.SendMessage(context.Background(), types.JID{
-		Server: "s.whatsapp.net",
-		User:   "status",
-	}, historyMsg)
-
-	if err != nil {
-		fmt.Printf("Failed to request history sync: %v\n", err)
-	} else {
-		fmt.Println("History sync requested. Waiting for server response...")
-	}
 }
 
 // analyzeOggOpus tries to extract duration and generate a simple waveform from an Ogg Opus file
