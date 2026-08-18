@@ -1,4 +1,7 @@
+import sys
 from typing import List, Dict, Any, Optional
+
+import anyio
 from mcp.server.fastmcp import FastMCP
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
@@ -247,5 +250,10 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
         }
 
 if __name__ == "__main__":
-    # Initialize and run the server
-    mcp.run(transport='stdio')
+    # Initialize and run the server. If the client disconnects mid-write
+    # (e.g. the parent process exits or kills the pipe), exit quietly
+    # instead of dumping a broken-pipe traceback.
+    try:
+        mcp.run(transport='stdio')
+    except* (BrokenPipeError, anyio.BrokenResourceError):
+        pass
