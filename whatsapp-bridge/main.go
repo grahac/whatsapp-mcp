@@ -774,8 +774,9 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Start the server. Bind to loopback only: these endpoints are
+	// unauthenticated, so they must not be reachable from the network.
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
@@ -925,12 +926,28 @@ func main() {
 	client.Disconnect()
 }
 
+func isNumericChatName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	for _, char := range name {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+
+	return true
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
 func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
-	// First, check if chat already exists in database with a name
+	// First, check if chat already exists in database with a useful name.
+	// Earlier history syncs persisted numeric JIDs as names, so keep resolving
+	// those rather than allowing them to block a newly available contact name.
 	var existingName string
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
-	if err == nil && existingName != "" {
+	if err == nil && existingName != "" && !isNumericChatName(existingName) {
 		// Chat exists with a name, use that
 		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
 		return existingName
@@ -990,14 +1007,25 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
+		// Prefer the address-book name, but fall back to WhatsApp's push name.
 		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
-			name = contact.FullName
-		} else if sender != "" {
+		if err == nil {
+			switch {
+			case contact.FullName != "":
+				name = contact.FullName
+			case contact.FirstName != "":
+				name = contact.FirstName
+			case contact.PushName != "":
+				name = contact.PushName
+			case contact.BusinessName != "":
+				name = contact.BusinessName
+			}
+		}
+
+		if name == "" && sender != "" {
 			// Fallback to sender
 			name = sender
-		} else {
+		} else if name == "" {
 			// Last fallback to JID
 			name = jid.User
 		}
