@@ -11,6 +11,25 @@ MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
+def _load_bridge_token() -> str:
+    """Mirror of the bridge's token resolution: env first, then the token file.
+    The bridge (re)generates the file on startup, so an empty result here just
+    means the server will get a 401 and surface the error."""
+    tok = os.environ.get("WHATSAPP_BRIDGE_TOKEN", "").strip()
+    if tok:
+        return tok
+    path = os.path.join(os.path.expanduser("~"), ".whatsapp-mcp", "bridge-token")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+BRIDGE_TOKEN = _load_bridge_token()
+
+def _bridge_headers():
+    return {"Authorization": f"Bearer {BRIDGE_TOKEN}"} if BRIDGE_TOKEN else None
+
 @dataclass
 class Message:
     timestamp: datetime
@@ -743,7 +762,7 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "message": message,
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -777,7 +796,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -817,7 +836,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -850,7 +869,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "chat_jid": chat_jid
         }
         
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, headers=_bridge_headers())
         
         if response.status_code == 200:
             result = response.json()

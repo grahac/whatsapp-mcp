@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -675,13 +678,68 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// ── Bridge authentication ─────────────────────────────────────────────
+// Every /api/* request must present this bearer token. The token keeps out
+// other local processes and drive-by web pages; the JSON content-type check
+// additionally blocks CORS-simple browser requests, which cannot set headers.
+var bridgeToken string
+
+func loadOrCreateBridgeToken() string {
+	if t := os.Getenv("WHATSAPP_BRIDGE_TOKEN"); t != "" {
+		return t
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		panic("whatsapp-bridge: cannot resolve home dir for bridge token: " + err.Error())
+	}
+	tokenPath := filepath.Join(home, ".whatsapp-mcp", "bridge-token")
+	if b, err := os.ReadFile(tokenPath); err == nil {
+		if t := strings.TrimSpace(string(b)); t != "" {
+			fmt.Printf("Bridge auth token loaded from %s\n", tokenPath)
+			return t
+		}
+	}
+	raw := make([]byte, 32)
+	if _, err := cryptorand.Read(raw); err != nil {
+		panic("whatsapp-bridge: cannot generate bridge token: " + err.Error())
+	}
+	t := hex.EncodeToString(raw)
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		panic("whatsapp-bridge: cannot create token dir: " + err.Error())
+	}
+	if err := os.WriteFile(tokenPath, []byte(t), 0o600); err != nil {
+		panic("whatsapp-bridge: cannot write bridge token file: " + err.Error())
+	}
+	fmt.Printf("Bridge auth token generated at %s (mode 0600)\n", tokenPath)
+	return t
+}
+
+func bridgeAuthOK(w http.ResponseWriter, r *http.Request) bool {
+	if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
+		return false
+	}
+	presented := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if presented == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(bridgeToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	bridgeToken = loadOrCreateBridgeToken()
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if !bridgeAuthOK(w, r) {
 			return
 		}
 
@@ -703,7 +761,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		fmt.Printf("Send request: recipient=%s message_len=%d media_len=%d\n", req.Recipient, len(req.Message), len(req.MediaPath))
 
 		// Send the message
 		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
@@ -728,6 +786,10 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if !bridgeAuthOK(w, r) {
 			return
 		}
 
